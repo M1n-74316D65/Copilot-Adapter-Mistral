@@ -1,6 +1,6 @@
 {
-  "name": "mistral-api-for-copilot-adapter",
-  "displayName": "Mistral Models for Copilot Chat",
+  "name": "mistral-vibe-copilot",
+  "displayName": "Mistral Vibe for Copilot Chat",
   "version": "1.4.0",
   "icon": ".github/asset/icon.png",
   "description": "Mistral Models integration for Copilot Chat",
@@ -23,7 +23,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/BlackTeaRemos/Copilot-Adapter-Mistral.git"
+    "url": "https://github.com/M1n-74316D65/Copilot-Adapter-Mistral.git"
   },
   "license": "MIT",
   "qna": "marketplace",
@@ -32,7 +32,7 @@
     "email": "9794561+BlackTeaRemos@users.noreply.github.com",
     "url": "https://github.com/BlackTeaRemos"
   },
-  "publisher": "BlackTeaRemos",
+  "publisher": "M1n",
   "main": "./dist/extension.js",
   "scripts": {
     "build": "tsdown",
