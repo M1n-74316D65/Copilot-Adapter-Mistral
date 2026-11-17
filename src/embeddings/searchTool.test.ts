@@ -51,12 +51,13 @@ describe( `createSearchTool`, () => {
         expect( GetToolResultText( result ) ).toContain( `a.ts` );
     } );
 
-    it( `auto-builds the index when not ready, then searches`, async () => {
-        const index = fakeIndex( [ { entry: entry( `a.ts`, `code` ), score: 0.9 } ], `empty` );
+    it( `does not auto-build when the index is not ready; tells the user to build first`, async () => {
+        const index = fakeIndex( [], `empty` );
         const tool = createSearchTool( index, log );
-        await tool.invoke( CreateToolInvocationOptions( { query: `q` } ), NO_CANCEL_TOKEN );
-        expect( index.build ).toHaveBeenCalledOnce();
-        expect( index.search ).toHaveBeenCalled();
+        const out = await tool.invoke( CreateToolInvocationOptions( { query: `q` } ), NO_CANCEL_TOKEN );
+        expect( index.build ).not.toHaveBeenCalled();
+        expect( index.search ).not.toHaveBeenCalled();
+        expect( GetToolResultText( out ) ).toMatch( /Build Codebase Embedding Index/ );
     } );
 
     it( `drops weak matches below MIN_SCORE`, async () => {
@@ -92,12 +93,13 @@ describe( `createSearchTool`, () => {
         expect( GetToolResultText( result ) ).toBe( `No query provided.` );
     } );
 
-    it( `reports a build failure as tool text`, async () => {
+    it( `never surfaces raw build errors to the model`, async () => {
         const index = fakeIndex( [], `empty` );
         index.build.mockRejectedValue( new Error( `no api key` ) );
         const tool = createSearchTool( index, log );
         const out = ( await tool.invoke( CreateToolInvocationOptions( { query: `q` } ), NO_CANCEL_TOKEN ) );
-        expect( GetToolResultText( out ) ).toContain( `no api key` );
+        expect( GetToolResultText( out ) ).not.toContain( `no api key` );
+        expect( index.build ).not.toHaveBeenCalled();
         expect( index.search ).not.toHaveBeenCalled();
     } );
 

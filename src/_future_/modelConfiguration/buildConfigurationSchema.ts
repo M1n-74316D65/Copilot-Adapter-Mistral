@@ -10,7 +10,7 @@ export function BuildConfigurationSchema ( model: MistralModel ): ModelConfigura
             ...( contextSize ? { contextSize } : {} ),
             temperature: {
                 type: `number`,
-                default: model.temperature ?? 0.7,
+                default: model.temperature ?? 0.2,
                 minimum: 0,
                 maximum: 1,
                 description: `Sampling temperature. Lower is more deterministic.`,

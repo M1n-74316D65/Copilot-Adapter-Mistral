@@ -15,3 +15,6 @@ CHANGELOG.md
 README.md
 node_modules/**
 *.map
+bun.lock
+LICENSE.md
+THIRD-PARTY-NOTICES.md

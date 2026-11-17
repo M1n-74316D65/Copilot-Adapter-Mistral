@@ -1,3 +1,4 @@
+import { workspace } from 'vscode';
 import { createMistralClient } from '../client/index.js';
 import { AuthDeps } from './authDeps.js';
 import { setApiKey } from './setApiKey.js';
@@ -8,6 +9,12 @@ export async function initClient ( silent: boolean, deps: AuthDeps ): Promise<bo
     }
     const { context, log } = deps;
     let apiKey: string | undefined = await context.secrets.get( `MISTRAL_API_KEY` );
+    if ( !apiKey ) {
+        const configured = workspace.getConfiguration( `mistral` ).get<string>( `apiKey` );
+        if ( configured && configured.trim().length > 0 ) {
+            apiKey = configured.trim();
+        }
+    }
     log.debug( `[Mistral] initClient called (silent=` + silent + `, hasStoredKey=` + !!apiKey + `)` );
     if ( !silent && !apiKey ) {
         apiKey = await setApiKey( deps );

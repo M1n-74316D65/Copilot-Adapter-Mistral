@@ -13,3 +13,8 @@ export function getBooleanOption ( opts: ModelOptions, key: string ): boolean | 
     const optionValue = opts[ key ];
     return typeof optionValue === `boolean` ? optionValue : undefined;
 }
+
+export function getStringOption ( opts: ModelOptions, key: string ): string | undefined {
+    const optionValue = opts[ key ];
+    return typeof optionValue === `string` && optionValue.length > 0 ? optionValue : undefined;
+}

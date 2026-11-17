@@ -35,8 +35,8 @@
   "publisher": "BlackTeaRemos",
   "main": "./dist/extension.js",
   "scripts": {
-    "build": "tsdown && node -e \"require('fs').renameSync('dist/extension.cjs', 'dist/extension.js'); require('fs').renameSync('dist/extension.cjs.map', 'dist/extension.js.map')\"",
-    "build:prod": "NODE_ENV=production tsdown && node -e \"const fs=require('fs'); fs.renameSync('dist/extension.cjs', 'dist/extension.js'); if(fs.existsSync('dist/extension.cjs.map')) fs.renameSync('dist/extension.cjs.map', 'dist/extension.js.map');\"",
+    "build": "tsdown",
+    "build:prod": "NODE_ENV=production tsdown",
     "check": "tsc --noEmit",
     "lint": "oxlint src",
     "lint:fix": "oxlint src --fix",
@@ -158,7 +158,7 @@
         "mistral.temperature": {
           "type": "number",
           "description": "Default temperature for completions",
-          "default": 0.7,
+          "default": 0.2,
           "minimum": 0,
           "maximum": 1,
           "order": 3

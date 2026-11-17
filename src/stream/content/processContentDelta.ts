@@ -12,6 +12,10 @@ export function processContentDelta (
     progress: Progress<LanguageModelResponsePart>,
     log: { debug: ( message: string ) => void; info: ( message: string ) => void },
 ): void {
+    if ( !state.thinkingEnabled ) {
+        ReportContentText( raw, state, progress, log );
+        return;
+    }
     let remaining = state.pendingText + raw;
     state.pendingText = ``;
     while ( remaining.length > 0 ) {

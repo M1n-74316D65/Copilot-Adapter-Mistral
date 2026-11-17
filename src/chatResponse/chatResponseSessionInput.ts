@@ -9,6 +9,7 @@ import type {
 } from 'vscode';
 import type { MistralModel, ToolCallIdMap } from '../types.js';
 import type { PromptTokenCounter } from './requestBudget/promptTokenCounter.js';
+import type { RetryOptions } from './requestRetry/callWithRetries.js';
 
 export interface ChatResponseSessionInput {
     readonly client: Mistral;
@@ -20,4 +21,6 @@ export interface ChatResponseSessionInput {
     readonly token: CancellationToken;
     readonly log: LogOutputChannel;
     readonly toolCallIdMap: ToolCallIdMap;
+    /** Test hook: override retry timing/budget. Production uses vibe's defaults. */
+    readonly retryOptions?: Partial<RetryOptions>;
 }

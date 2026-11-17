@@ -26,6 +26,7 @@ import { fetchModels } from './client/index.js';
 import type { StreamContext } from './stream/index.js';
 import { TokenizerCalibration } from './cacheCalibration.js';
 import { setApiKey, signInWithBrowser, initClient, type AuthDeps } from './auth/index.js';
+import { GetUserFriendlyError } from './extensionLifecycle/getUserFriendlyError.js';
 import { updateStatusBar } from './statusBar.js';
 import { ModelCache } from './client/modelCache.js';
 import { MistralChatStatus } from './_future_/chatStatusItem.js';
@@ -183,7 +184,7 @@ export class MistralChatModelProvider implements LanguageModelChatProvider<Mistr
     }
 
     private async __RefreshModels ( client: Mistral ): Promise<MistralModel[]> {
-        const fresh = await fetchModels( client, this.log );
+        const fresh = await fetchModels( client, this.log, this.context.globalState );
         if ( this.client !== client ) {
             return this.fetchedModels ?? [];
         }
@@ -360,9 +361,8 @@ export class MistralChatModelProvider implements LanguageModelChatProvider<Mistr
                 this.log.debug( `[Mistral] Cancelled request completed without an error response` );
                 return;
             }
-            const errorMessage = error instanceof Error ? error.message : `Unknown error occurred`;
             this.log.error( `[Mistral] provideLanguageModelChatResponse error: ` + ( error instanceof Error ? error.stack || error.message : String( error ) ) );
-            progress.report( new LanguageModelTextPart( `Error: ${ errorMessage }` ) );
+            progress.report( new LanguageModelTextPart( `Error: ${ GetUserFriendlyError( error ) }` ) );
         }
     }
 

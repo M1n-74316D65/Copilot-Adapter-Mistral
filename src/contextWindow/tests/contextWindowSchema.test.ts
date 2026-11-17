@@ -45,7 +45,7 @@ describe( `native context configuration`, () => {
 
     it( `preserves the existing sampling controls and inherited output budget`, () => {
         const properties = BuildConfigurationSchema( MODEL ).properties;
-        expect( properties.temperature.default ).toBe( 0.7 );
+        expect( properties.temperature.default ).toBe( 0.2 );
         expect( properties.topP.default ).toBe( 1 );
         expect( properties.safePrompt.default ).toBe( false );
         expect( properties.maxTokens ).not.toHaveProperty( `default` );

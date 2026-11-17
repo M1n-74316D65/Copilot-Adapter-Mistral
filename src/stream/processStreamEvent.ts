@@ -10,6 +10,10 @@ import type { StreamLogger } from './streamLogger.js';
 export type { StreamContext } from './streamContext.js';
 export type { StreamLogger } from './streamLogger.js';
 
+// Stateless accumulator; state lives in `context.usage`, so one shared
+// instance is enough instead of allocating per stream event.
+const usageAccumulator = new UsageAccumulator();
+
 export function processStreamEvent (
     event: CompletionEvent,
     context: StreamContext,
@@ -22,7 +26,7 @@ export function processStreamEvent (
         log.info( `[Mistral] served by model: ${ chunk.model }` );
     }
     if ( chunk?.usage ) {
-        new UsageAccumulator().Record( chunk.usage, context.usage, log );
+        usageAccumulator.Record( chunk.usage, context.usage, log );
     }
     const choice = chunk?.choices?.[ 0 ];
     if ( !choice ) {

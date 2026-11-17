@@ -29,10 +29,21 @@ export class ModelCardConverter {
             toolCalling: card.capabilities?.functionCalling ?? false,
             supportsParallelToolCalls: card.capabilities?.functionCalling ?? false,
             supportsVision: card.capabilities?.vision ?? false,
+            supportsReasoning: this.__SupportsReasoning( card ),
             supportsCompletionFim: card.capabilities?.completionFim ?? false,
             completionChat: card.capabilities?.completionChat ?? false,
             temperature: card.defaultModelTemperature ?? undefined,
         };
+    }
+
+    private __SupportsReasoning ( card: KnownModelCard ): boolean {
+        const capabilities = card.capabilities as Record<string, unknown> | undefined;
+        if ( capabilities && typeof capabilities[ `reasoning` ] === `boolean` ) {
+            return capabilities[ `reasoning` ];
+        }
+        const parameters = ( card as Record<string, unknown> )[ `parameters` ] as Record<string, unknown> | undefined;
+        const reasoning = parameters?.[ `reasoning` ];
+        return Array.isArray( reasoning ) && reasoning.length > 0;
     }
 
     private __ResolveOutputLimit ( card: KnownModelCard ): number | undefined {

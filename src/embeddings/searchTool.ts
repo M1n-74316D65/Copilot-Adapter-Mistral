@@ -70,12 +70,8 @@ export function createSearchTool (
 
             await index.load();
             if ( index.getState() !== `ready` ) {
-                log.info( `[Mistral] searchCodebase: index empty - building before first search.` );
-                try {
-                    await index.build( undefined, token );
-                } catch ( err ) {
-                    return text( `Could not build the Mistral embedding index: ${ err instanceof Error ? err.message : String( err ) }` );
-                }
+                log.info( `[Mistral] searchCodebase: index not ready - refusing to auto-build.` );
+                return text( `The Mistral embedding index is empty or stale. Run the "Mistral: Build Codebase Embedding Index" command first, then search again.` );
             }
 
             log.info( `[Mistral] searchCodebase tool: "${ query }" (max ${ maxResults })` );

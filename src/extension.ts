@@ -186,22 +186,33 @@ export function activate ( context: vscode.ExtensionContext ) {
             vscode.window.showInformationMessage( `Mistral: no matches. Build the index first via "Mistral: Build Codebase Embedding Index".` );
             return;
         }
-        const rootFolder = vscode.workspace.workspaceFolders?.[ 0 ];
-        if ( !rootFolder ) {
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        if ( folders.length === 0 ) {
             logOutputChannel.warn( `[Mistral] Search results could not be opened because the workspace was closed.` );
             return;
         }
-        const items: (vscode.QuickPickItem & { uri: vscode.Uri; line: number; })[] = results.map( r => {
+        const resolveUri = async ( file: string ): Promise<vscode.Uri> => {
+            for ( const folder of folders ) {
+                const candidate = vscode.Uri.joinPath( folder.uri, file );
+                try {
+                    await vscode.workspace.fs.stat( candidate );
+                    return candidate;
+                } catch {
+                }
+            }
+            return vscode.Uri.joinPath( folders[ 0 ].uri, file );
+        };
+        const items: (vscode.QuickPickItem & { uri: vscode.Uri; line: number; })[] = await Promise.all( results.map( async r => {
             return {
                 label: `$(file-code) ${ r.entry.file }:${ r.entry.startLine }`,
                 description: `${ ( r.score * 100 ).toFixed( 0 ) }%`,
                 detail: r.entry.text.split( `\n` ).find( l => {
                     return l.trim().length > 0;
                 } )?.slice( 0, 120 ),
-                uri: vscode.Uri.joinPath( rootFolder.uri, r.entry.file ),
+                uri: await resolveUri( r.entry.file ),
                 line: r.entry.startLine,
             };
-        } );
+        } ) );
         const pick = await vscode.window.showQuickPick( items, { title: `Mistral: ${ results.length } matches`, matchOnDetail: true } );
         if ( !pick ) {
             return;

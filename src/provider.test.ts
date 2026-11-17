@@ -21,7 +21,19 @@ vi.mock( `./client/index.js`, async ( importOriginal ) => {
         ...actual,
         createMistralClient: vi.fn().mockReturnValue( {
             models: { list: vi.fn().mockResolvedValue( {} ) },
-        } ),
+        }),
+    };
+} );
+
+// Retry behavior is unit-tested in requestRetry/callWithRetries.test.ts; here a
+// single attempt keeps stream-failure tests fast and deterministic.
+vi.mock( `./chatResponse/requestRetry/callWithRetries.js`, async ( importOriginal ) => {
+    const actual = await importOriginal<typeof import( './chatResponse/requestRetry/callWithRetries.js' )>();
+    return {
+        ...actual,
+        callWithRetries: ( attempt: () => Promise<unknown> ) => {
+            return attempt();
+        },
     };
 } );
 

@@ -3,8 +3,11 @@ import {
     CLOCK_SKEW_TOLERANCE_MS,
     DEFAULT_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_BROWSER_AUTH_BASE_URL,
+    HTTP_FORBIDDEN,
     HTTP_GONE,
     HTTP_TOO_MANY_REQUESTS,
+    WORKSPACE_NOT_ELIGIBLE_MESSAGE,
+    isWorkspaceApiKeyCreationDenied,
     MAX_CONSECUTIVE_POLL_FAILURES,
     POLL_BACKOFF_BASE_MS,
     POLL_BACKOFF_MAX_MS,
@@ -22,16 +25,16 @@ import { validateUrlAgainstBase } from './validateUrlAgainstBase.js';
 
 export interface BrowserSignInDeps {
     log: LogOutputChannel;
-    openBrowser: ( url: string ) => Promise<boolean>;
-    onStatus?: ( status: BrowserSignInStatus ) => void;
-    onAttemptStarted?: ( signInUrl: string, expiresAt: Date ) => void;
+    openBrowser: (url: string) => Promise<boolean>;
+    onStatus?: (status: BrowserSignInStatus) => void;
+    onAttemptStarted?: (signInUrl: string, expiresAt: Date) => void;
     signal?: AbortSignal;
     browserBaseUrl?: string;
     apiBaseUrl?: string;
-    sleep?: ( ms: number ) => Promise<void>;
+    allowOriginRewrite?: boolean;
+    sleep?: (ms: number) => Promise<void>;
     now?: () => number;
 }
-
 
 /**
  * Browser sign-in (PKCE polling) flow ported from mistral-vibe.
@@ -57,79 +60,85 @@ export interface BrowserSignInDeps {
  */
 export class BrowserSignInService {
     private readonly log: LogOutputChannel;
-    private readonly openBrowser: ( url: string ) => Promise<boolean>;
-    private readonly onStatus?: ( status: BrowserSignInStatus ) => void;
-    private readonly onAttemptStarted?: ( signInUrl: string, expiresAt: Date ) => void;
+    private readonly openBrowser: (url: string) => Promise<boolean>;
+    private readonly onStatus?: (status: BrowserSignInStatus) => void;
+    private readonly onAttemptStarted?: (signInUrl: string, expiresAt: Date) => void;
     private readonly signal?: AbortSignal;
     private readonly browserBaseUrl: string;
     private readonly apiBaseUrl: string;
-    private readonly sleep: ( ms: number ) => Promise<void>;
+    private readonly allowOriginRewrite: boolean;
+    private readonly sleep: (ms: number) => Promise<void>;
     private readonly now: () => number;
 
-    constructor ( deps: BrowserSignInDeps ) {
+    constructor (deps: BrowserSignInDeps) {
         this.log = deps.log;
         this.openBrowser = deps.openBrowser;
         this.onStatus = deps.onStatus;
         this.onAttemptStarted = deps.onAttemptStarted;
         this.signal = deps.signal;
-        this.browserBaseUrl = ( deps.browserBaseUrl ?? DEFAULT_BROWSER_AUTH_BASE_URL ).replace( /\/+$/, `` );
-        this.apiBaseUrl = ( deps.apiBaseUrl ?? DEFAULT_BROWSER_AUTH_API_BASE_URL ).replace( /\/+$/, `` );
-        this.sleep = deps.sleep ?? ( ms => {
-            return new Promise( resolve => {
-                return setTimeout( resolve, ms );
-            } );
-        } );
-        this.now = deps.now ?? ( () => {
-            return Date.now();
-        } );
+        this.browserBaseUrl = (deps.browserBaseUrl ?? DEFAULT_BROWSER_AUTH_BASE_URL).replace(/\/+$/, ``);
+        this.apiBaseUrl = (deps.apiBaseUrl ?? DEFAULT_BROWSER_AUTH_API_BASE_URL).replace(/\/+$/, ``);
+        this.allowOriginRewrite = deps.allowOriginRewrite ?? false;
+        this.sleep =
+            deps.sleep ??
+            (ms => {
+                return new Promise(resolve => {
+                    return setTimeout(resolve, ms);
+                });
+            });
+        this.now =
+            deps.now ??
+            (() => {
+                return Date.now();
+            });
     }
 
     public async authenticate (): Promise<string> {
         const attempt = await this.startAttempt();
-        this.onAttemptStarted?.( attempt.signInUrl, new Date( attempt.expiresAt ) );
-        this.emit( `opening_browser` );
-        await this.openBrowserOrThrow( attempt.signInUrl );
-        this.emit( `waiting_for_browser_sign_in` );
-        const exchangeToken = await this.waitForCompletion( attempt );
-        this.emit( `exchanging` );
-        const apiKey = await this.exchange( attempt, exchangeToken );
-        this.emit( `completed` );
+        this.onAttemptStarted?.(attempt.signInUrl, new Date(attempt.expiresAt));
+        this.emit(`opening_browser`);
+        await this.openBrowserOrThrow(attempt.signInUrl);
+        this.emit(`waiting_for_browser_sign_in`);
+        const exchangeToken = await this.waitForCompletion(attempt);
+        this.emit(`exchanging`);
+        const apiKey = await this.exchange(attempt, exchangeToken);
+        this.emit(`completed`);
         return apiKey;
     }
 
-    private emit ( status: BrowserSignInStatus ): void {
-        this.onStatus?.( status );
+    private emit (status: BrowserSignInStatus): void {
+        this.onStatus?.(status);
     }
 
     private throwIfAborted (): void {
-        if ( this.signal?.aborted ) {
-            throw new BrowserSignInError( `Browser sign-in was cancelled.`, `timed_out` );
+        if (this.signal?.aborted) {
+            throw new BrowserSignInError(`Browser sign-in was cancelled.`, `timed_out`);
         }
     }
 
     private async startAttempt (): Promise<Attempt> {
         const pkceCodes = new PkceCodes();
         const verifier = pkceCodes.GenerateVerifier();
-        const challenge = await pkceCodes.GenerateChallenge( verifier );
+        const challenge = await pkceCodes.GenerateChallenge(verifier);
 
         let response: Response;
         try {
-            response = await fetch( `${ this.apiBaseUrl }/vibe/sign-in`, {
+            response = await fetch(`${this.apiBaseUrl}/vibe/sign-in`, {
                 method: `POST`,
                 headers: { 'content-type': `application/json` },
-                body: JSON.stringify( { code_challenge: challenge, code_challenge_method: `S256` } ),
+                body: JSON.stringify({ code_challenge: challenge, code_challenge_method: `S256` }),
                 signal: this.signal,
-            } );
-        } catch ( err ) {
-            this.log.warn( `[Mistral] Browser sign-in start request failed: ` + String( err ) );
-            throw new BrowserSignInError( `Failed to start browser sign-in.`, `start_failed` );
+            });
+        } catch (err) {
+            this.log.warn(`[Mistral] Browser sign-in start request failed: ` + String(err));
+            throw new BrowserSignInError(`Failed to start browser sign-in.`, `start_failed`);
         }
-        if ( !response.ok ) {
-            this.log.warn( `[Mistral] Browser sign-in start returned status ` + response.status );
-            throw new BrowserSignInError( `Failed to start browser sign-in.`, `start_failed` );
+        if (!response.ok) {
+            this.log.warn(`[Mistral] Browser sign-in start returned status ` + response.status);
+            throw new BrowserSignInError(`Failed to start browser sign-in.`, `start_failed`);
         }
 
-        const data = await parseJsonObject( response );
+        const data = await parseJsonObject(response);
         const payload = data as Partial<CreateProcessPayload>;
         if (
             typeof payload.process_id !== `string` ||
@@ -137,143 +146,158 @@ export class BrowserSignInService {
             typeof payload.poll_url !== `string` ||
             typeof payload.expires_at !== `string`
         ) {
-            throw new BrowserSignInError( `Failed to start browser sign-in.`, `start_failed` );
+            throw new BrowserSignInError(`Failed to start browser sign-in.`, `start_failed`);
         }
-        const expiresAt = Date.parse( payload.expires_at );
-        if ( Number.isNaN( expiresAt ) ) {
-            throw new BrowserSignInError( `Failed to start browser sign-in.`, `start_failed` );
+        const expiresAt = Date.parse(payload.expires_at);
+        if (Number.isNaN(expiresAt)) {
+            throw new BrowserSignInError(`Failed to start browser sign-in.`, `start_failed`);
         }
 
         return {
             processId: payload.process_id,
-            signInUrl: validateUrlAgainstBase( payload.sign_in_url, this.browserBaseUrl ),
-            pollUrl: validateUrlAgainstBase( payload.poll_url, this.apiBaseUrl ),
+            signInUrl: validateUrlAgainstBase(payload.sign_in_url, this.browserBaseUrl, this.allowOriginRewrite),
+            pollUrl: validateUrlAgainstBase(payload.poll_url, this.apiBaseUrl, this.allowOriginRewrite),
             expiresAt,
             codeVerifier: verifier,
         };
     }
 
-    private async openBrowserOrThrow ( signInUrl: string ): Promise<void> {
+    private async openBrowserOrThrow (signInUrl: string): Promise<void> {
         let opened: boolean;
         try {
-            opened = await this.openBrowser( signInUrl );
-        } catch ( err ) {
-            this.log.warn( `[Mistral] Failed to open browser for sign-in: ` + String( err ) );
-            throw new BrowserSignInError( `Failed to open browser for sign-in.`, `open_browser_failed` );
+            opened = await this.openBrowser(signInUrl);
+        } catch (err) {
+            this.log.warn(`[Mistral] Failed to open browser for sign-in: ` + String(err));
+            throw new BrowserSignInError(`Failed to open browser for sign-in.`, `open_browser_failed`);
         }
-        if ( !opened ) {
-            throw new BrowserSignInError( `Failed to open browser for sign-in.`, `open_browser_failed` );
+        if (!opened) {
+            throw new BrowserSignInError(`Failed to open browser for sign-in.`, `open_browser_failed`);
         }
     }
 
-    private async waitForCompletion ( attempt: Attempt ): Promise<string> {
+    private async waitForCompletion (attempt: Attempt): Promise<string> {
         const deadline = attempt.expiresAt + CLOCK_SKEW_TOLERANCE_MS;
         let consecutiveFailures = 0;
-        while ( this.now() < deadline ) {
+        while (this.now() < deadline) {
             this.throwIfAborted();
             let payload: PollPayload;
             try {
-                payload = await this.poll( attempt.pollUrl );
-            } catch ( err ) {
-                if ( err instanceof BrowserSignInError && err.code === `poll_failed` ) {
+                payload = await this.poll(attempt.pollUrl);
+            } catch (err) {
+                if (err instanceof BrowserSignInError && err.code === `poll_failed`) {
                     consecutiveFailures += 1;
-                    if ( consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES ) {
+                    if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
                         throw err;
                     }
-                    await this.sleepUntilNextPollOrTimeout( deadline, this.backoffDelay( consecutiveFailures ) );
+                    await this.sleepUntilNextPollOrTimeout(deadline, this.backoffDelay(consecutiveFailures));
                     continue;
                 }
                 throw err;
             }
 
             consecutiveFailures = 0;
-            switch ( payload.status ) {
+            switch (payload.status) {
                 case `pending`:
-                    await this.sleepUntilNextPollOrTimeout( deadline, payload.retryAfterMs );
+                    await this.sleepUntilNextPollOrTimeout(deadline, payload.retryAfterMs);
                     break;
                 case `completed`:
-                    if ( payload.exchange_token ) {
+                    if (payload.exchange_token) {
                         return payload.exchange_token;
                     }
-                    throw new BrowserSignInError( `Sign-in worked, but setup couldn't finish.`, `missing_exchange_token` );
+                    throw new BrowserSignInError(
+                        `Sign-in worked, but setup couldn't finish.`,
+                        `missing_exchange_token`,
+                    );
                 case `expired`:
-                    throw new BrowserSignInError( `Browser sign-in expired.`, `expired` );
+                    throw new BrowserSignInError(`Browser sign-in expired.`, `expired`);
                 case `denied`:
-                    throw new BrowserSignInError( `Browser sign-in was denied.`, `denied` );
+                    throw new BrowserSignInError(`Browser sign-in was denied.`, `denied`);
                 case `error`:
-                    throw new BrowserSignInError( payload.message || `Browser sign-in failed.`, `provider_error` );
+                    throw new BrowserSignInError(payload.message || `Browser sign-in failed.`, `provider_error`);
                 default:
-                    throw new BrowserSignInError( `Browser sign-in returned an unknown state.`, `unknown_state` );
+                    throw new BrowserSignInError(`Browser sign-in returned an unknown state.`, `unknown_state`);
             }
         }
-        throw new BrowserSignInError( `Browser sign-in timed out.`, `timed_out` );
+        throw new BrowserSignInError(`Browser sign-in timed out.`, `timed_out`);
     }
 
-    private async poll ( pollUrl: string ): Promise<PollPayload> {
-        const validated = validateUrlAgainstBase( pollUrl, this.apiBaseUrl );
+    private async poll (pollUrl: string): Promise<PollPayload> {
+        const validated = validateUrlAgainstBase(pollUrl, this.apiBaseUrl, this.allowOriginRewrite);
         let response: Response;
         try {
-            response = await fetch( validated, { signal: this.signal } );
+            response = await fetch(validated, { signal: this.signal });
         } catch {
-            throw new BrowserSignInError( `Browser sign-in status could not be retrieved.`, `poll_failed` );
+            throw new BrowserSignInError(`Browser sign-in status could not be retrieved.`, `poll_failed`);
         }
-        if ( response.status === HTTP_GONE ) {
+        if (response.status === HTTP_GONE) {
             return { status: `expired` };
         }
-        if ( response.status === HTTP_TOO_MANY_REQUESTS ) {
-            return { status: `pending`, retryAfterMs: parseRetryAfter( response, this.now ) };
+        if (response.status === HTTP_TOO_MANY_REQUESTS) {
+            return { status: `pending`, retryAfterMs: parseRetryAfter(response, this.now) };
         }
-        if ( !response.ok ) {
-            throw new BrowserSignInError( `Browser sign-in status could not be retrieved.`, `poll_failed` );
+        if (!response.ok) {
+            throw new BrowserSignInError(`Browser sign-in status could not be retrieved.`, `poll_failed`);
         }
-        const data = await parseJsonObject( response );
+        const data = await parseJsonObject(response);
         const status = data.status;
-        if ( status !== `pending` && status !== `completed` && status !== `expired` && status !== `denied` && status !== `error` ) {
-            throw new BrowserSignInError( `Browser sign-in returned an unknown state.`, `unknown_state` );
+        if (
+            status !== `pending` &&
+            status !== `completed` &&
+            status !== `expired` &&
+            status !== `denied` &&
+            status !== `error`
+        ) {
+            throw new BrowserSignInError(`Browser sign-in returned an unknown state.`, `unknown_state`);
         }
         return {
             status,
             exchange_token: typeof data.exchange_token === `string` ? data.exchange_token : undefined,
             message: typeof data.message === `string` ? data.message : undefined,
-            retryAfterMs: parseRetryAfter( response, this.now ),
+            retryAfterMs: parseRetryAfter(response, this.now),
         };
     }
 
-    private backoffDelay ( attempt: number ): number {
-        const base = Math.min( POLL_BACKOFF_BASE_MS * 2 ** ( attempt - 1 ), POLL_BACKOFF_MAX_MS );
-        return base + Math.floor( Math.random() * 500 );
+    private backoffDelay (attempt: number): number {
+        const base = Math.min(POLL_BACKOFF_BASE_MS * 2 ** (attempt - 1), POLL_BACKOFF_MAX_MS);
+        return base + Math.floor(Math.random() * 500);
     }
 
-    private async sleepUntilNextPollOrTimeout ( deadline: number, requestedMs?: number ): Promise<void> {
+    private async sleepUntilNextPollOrTimeout (deadline: number, requestedMs?: number): Promise<void> {
         const remaining = deadline - this.now();
-        if ( remaining <= 0 ) {
-            throw new BrowserSignInError( `Browser sign-in timed out.`, `timed_out` );
+        if (remaining <= 0) {
+            throw new BrowserSignInError(`Browser sign-in timed out.`, `timed_out`);
         }
         const wanted = requestedMs && requestedMs > 0 ? requestedMs : POLL_INTERVAL_MS;
-        await this.sleep( Math.min( wanted, remaining ) );
+        await this.sleep(Math.min(wanted, remaining));
     }
 
-    private async exchange ( attempt: Attempt, exchangeToken: string ): Promise<string> {
+    private async exchange (attempt: Attempt, exchangeToken: string): Promise<string> {
         let response: Response;
         try {
-            response = await fetch( `${ this.apiBaseUrl }/vibe/sign-in/${ encodeURIComponent( attempt.processId ) }/exchange`, {
-                method: `POST`,
-                headers: { 'content-type': `application/json` },
-                body: JSON.stringify( { exchange_token: exchangeToken, code_verifier: attempt.codeVerifier } ),
-                signal: this.signal,
-            } );
-        } catch ( err ) {
-            this.log.warn( `[Mistral] Browser sign-in exchange request failed: ` + String( err ) );
-            throw new BrowserSignInError( `Failed to exchange browser sign-in for an API key.`, `exchange_failed` );
+            response = await fetch(
+                `${this.apiBaseUrl}/vibe/sign-in/${encodeURIComponent(attempt.processId)}/exchange`,
+                {
+                    method: `POST`,
+                    headers: { 'content-type': `application/json` },
+                    body: JSON.stringify({ exchange_token: exchangeToken, code_verifier: attempt.codeVerifier }),
+                    signal: this.signal,
+                },
+            );
+        } catch (err) {
+            this.log.warn(`[Mistral] Browser sign-in exchange request failed: ` + String(err));
+            throw new BrowserSignInError(`Failed to exchange browser sign-in for an API key.`, `exchange_failed`);
         }
-        if ( !response.ok ) {
-            this.log.warn( `[Mistral] Browser sign-in exchange returned status ` + response.status );
-            throw new BrowserSignInError( `Failed to exchange browser sign-in for an API key.`, `exchange_failed` );
+        if (!response.ok) {
+            this.log.warn(`[Mistral] Browser sign-in exchange returned status ` + response.status);
+            if (response.status === HTTP_FORBIDDEN && (await isWorkspaceApiKeyCreationDenied(response))) {
+                throw new BrowserSignInError(WORKSPACE_NOT_ELIGIBLE_MESSAGE, `exchange_failed`);
+            }
+            throw new BrowserSignInError(`Failed to exchange browser sign-in for an API key.`, `exchange_failed`);
         }
-        const data = await parseJsonObject( response );
-        if ( typeof data.api_key === `string` && data.api_key ) {
+        const data = await parseJsonObject(response);
+        if (typeof data.api_key === `string` && data.api_key) {
             return data.api_key;
         }
-        throw new BrowserSignInError( `Browser sign-in exchange did not return an API key.`, `missing_api_key` );
+        throw new BrowserSignInError(`Browser sign-in exchange did not return an API key.`, `missing_api_key`);
     }
 }

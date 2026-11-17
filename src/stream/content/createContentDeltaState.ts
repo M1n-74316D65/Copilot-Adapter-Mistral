@@ -1,5 +1,5 @@
 import type { ContentDeltaState } from './contentDeltaState.js';
 
-export function createContentDeltaState (): ContentDeltaState {
-    return { thinkDepth: 0, pendingText: `` };
+export function createContentDeltaState ( thinkingEnabled = true ): ContentDeltaState {
+    return { thinkDepth: 0, pendingText: ``, thinkingEnabled };
 }

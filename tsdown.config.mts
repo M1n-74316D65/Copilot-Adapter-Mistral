@@ -25,4 +25,5 @@ export default defineConfig( {
   sourcemap: !production,
   minify: production,
   clean: true,
+  outExtensions: () => ( { js: '.js' } ),
 } );

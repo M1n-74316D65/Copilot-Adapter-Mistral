@@ -2,8 +2,8 @@ import * as vscode from 'vscode';
 import { createHash } from 'crypto';
 import type { Mistral } from '@mistralai/mistralai';
 import {
+    cosineSimilarity,
     createEmbeddings,
-    rankBySimilarity,
     type EmbeddingModel,
     type EmbeddingsLogger,
 } from './mistralEmbeddings.js';
@@ -35,6 +35,73 @@ export interface ChunkOptions {
 }
 
 const DEFAULT_CHUNK: Required<ChunkOptions> = { maxLines: 40, maxChars: 1500 };
+
+const MAX_PERSISTED_FILES = 5000;
+const MAX_PERSISTED_CHUNKS = 50000;
+const MAX_VECTOR_DIMENSIONS = 4096;
+
+/**
+ * Path of `uri` relative to its own workspace folder. In multi-root
+ * workspaces `asRelativePath` prefixes the folder name; strip it so stored
+ * paths stay folder-relative and resolvable via any folder lookup.
+ */
+function workspaceRelativePath ( uri: vscode.Uri ): string {
+    const relative = vscode.workspace.asRelativePath( uri, false );
+    const folders = vscode.workspace.workspaceFolders;
+    if ( folders && folders.length > 1 ) {
+        const folder = vscode.workspace.getWorkspaceFolder( uri );
+        const prefix = folder ? `${ folder.name }/` : ``;
+        if ( prefix && relative.startsWith( prefix ) ) {
+            return relative.slice( prefix.length );
+        }
+    }
+    return relative;
+}
+
+/**
+ * Validates untrusted persisted-index JSON before it is used. Returns null
+ * when the payload is malformed or exceeds size caps.
+ */
+export function parsePersistedIndex ( data: unknown ): PersistedIndex | null {
+    if ( !data || typeof data !== `object` ) {
+        return null;
+    }
+    const candidate = data as PersistedIndex;
+    if ( typeof candidate.model !== `string` || !candidate.files || typeof candidate.files !== `object` ) {
+        return null;
+    }
+    const files: Record<string, FileIndex> = {};
+    let chunkCount = 0;
+    for ( const [ name, file ] of Object.entries( candidate.files ) ) {
+        if ( Object.keys( files ).length >= MAX_PERSISTED_FILES ) {
+            return null;
+        }
+        if ( !file || typeof file !== `object` || typeof file.hash !== `string` || !Array.isArray( file.chunks ) ) {
+            return null;
+        }
+        const chunks: IndexEntry[] = [];
+        for ( const chunk of file.chunks ) {
+            chunkCount += 1;
+            if ( chunkCount > MAX_PERSISTED_CHUNKS ) {
+                return null;
+            }
+            if (
+                !chunk || typeof chunk !== `object` ||
+                typeof chunk.file !== `string` || typeof chunk.text !== `string` ||
+                typeof chunk.startLine !== `number` || typeof chunk.endLine !== `number` ||
+                !Array.isArray( chunk.vector ) || chunk.vector.length > MAX_VECTOR_DIMENSIONS ||
+                !chunk.vector.every( v => {
+                    return typeof v === `number` && Number.isFinite( v );
+                } )
+            ) {
+                return null;
+            }
+            chunks.push( chunk );
+        }
+        files[ name ] = { hash: file.hash, chunks };
+    }
+    return { model: candidate.model, files };
+}
 
 /**
  * Splits document text into line-aligned chunks. A chunk closes when it reaches
@@ -187,13 +254,16 @@ export class CodebaseEmbeddingIndex {
         }
         try {
             const bytes = await vscode.workspace.fs.readFile( uri );
-            const data = JSON.parse( new TextDecoder().decode( bytes ) ) as PersistedIndex;
-            if ( data && data.files && typeof data.files === `object` ) {
-                this.files = data.files;
-                this.indexedModel = data.model as EmbeddingModel;
+            const parsed = parsePersistedIndex( JSON.parse( new TextDecoder().decode( bytes ) ) );
+            if ( parsed ) {
+                this.files = parsed.files;
+                this.indexedModel = parsed.model as EmbeddingModel;
                 this.log.info( `[Mistral] Loaded embedding index: ${ this.fileCount } files / ${ this.chunkCount } chunks (model ${ this.indexedModel }).` );
+            } else {
+                this.log.warn( `[Mistral] Persisted embedding index is malformed or oversized; treating it as empty.` );
             }
         } catch {
+            this.log.warn( `[Mistral] Could not read persisted embedding index; treating it as empty.` );
         }
         this.setState( this.chunkCount > 0 ? `ready` : `empty` );
     }
@@ -248,7 +318,7 @@ export class CodebaseEmbeddingIndex {
                         continue;
                     }
                     const text = new TextDecoder().decode( await vscode.workspace.fs.readFile( uri ) );
-                    current.push( { file: vscode.workspace.asRelativePath( uri, false ), hash: hashContent( text ), text } );
+                    current.push( { file: workspaceRelativePath( uri ), hash: hashContent( text ), text } );
                 } catch {
                 }
             }
@@ -361,15 +431,25 @@ export class CodebaseEmbeddingIndex {
         if ( !queryVec || queryVec.length === 0 ) {
             return [];
         }
-        return rankBySimilarity(
-            queryVec,
-            entries.map( entry => {
-                return { item: entry, vector: entry.vector };
-            } ),
-            topK,
-        ).map( r => {
-            return { entry: r.item, score: r.score };
+        // Score in batches, yielding to the event loop so large indexes do not
+        // block the extension host.
+        const scored: { entry: IndexEntry; score: number; }[] = [];
+        const BATCH_SIZE = 500;
+        for ( let start = 0; start < entries.length; start += BATCH_SIZE ) {
+            if ( token?.isCancellationRequested ) {
+                return [];
+            }
+            for ( const entry of entries.slice( start, start + BATCH_SIZE ) ) {
+                scored.push( { entry, score: cosineSimilarity( queryVec, entry.vector ) } );
+            }
+            await new Promise<void>( resolve => {
+                return setImmediate( resolve );
+            } );
+        }
+        scored.sort( ( a, b ) => {
+            return b.score - a.score;
         } );
+        return scored.slice( 0, topK );
     }
 
     async clear (): Promise<void> {

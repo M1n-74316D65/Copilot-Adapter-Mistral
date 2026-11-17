@@ -1,5 +1,5 @@
-import { LanguageModelChatToolMode, LanguageModelTextPart } from 'vscode';
-import { assertChatStreamRequest, toModelOptions, getNumberOption, getBooleanOption } from '../assertions/index.js';
+import { LanguageModelChatToolMode, LanguageModelTextPart, workspace } from 'vscode';
+import { assertChatStreamRequest, toModelOptions, getNumberOption, getBooleanOption, getStringOption } from '../assertions/index.js';
 import { toMistralMessages } from '../conversion/index.js';
 import { ReadModelConfiguration } from '../_future_/modelConfiguration/readModelConfiguration.js';
 import { ContextWindowResolver } from '../contextWindow/contextWindowResolver.js';
@@ -18,6 +18,8 @@ import { ReadGlobalTokenSetting } from '../completionBudget/readGlobalTokenSetti
 import { ReadCompletionTokenOverride } from '../completionBudget/readCompletionTokenOverride.js';
 import { PromptReservationEstimator } from './requestBudget/promptReservationEstimator.js';
 import { CompletionStreamOpener } from './requestBudget/completionStreamOpener.js';
+import { callWithRetries } from './requestRetry/callWithRetries.js';
+import { guardStream } from './requestRetry/streamGuard.js';
 
 export class ChatResponseSession {
     private readonly _budgetResolver = new CompletionBudgetResolver();
@@ -26,7 +28,7 @@ export class ChatResponseSession {
     public async Run ( input: ChatResponseSessionInput ): Promise<StreamContext> {
         const { client, model, messages, options, progress, token, log, toolCallIdMap } = input;
         const context: StreamContext = {
-            contentState: createContentDeltaState(),
+            contentState: createContentDeltaState( workspace.getConfiguration( `mistral` ).get<boolean>( `thinkingSupport` ) ?? true ),
             toolCallState: createToolCallState(),
             map: toolCallIdMap,
             usage: { input: 0, output: 0, cached: 0, lastPrompt: 0 },
@@ -80,11 +82,19 @@ export class ChatResponseSession {
             : ``;
         let budgetDescription = this.__DescribeBudget( budget, model.outputLimitSource ) + contextDescription + reservationDescription;
         log.debug( `[Mistral] Completion budget: ${ budgetDescription }` );
+        // reasoning_effort is sent only to models known to support reasoning
+        // (vibe's takes_reasoning_input gate), with off mapped to "none".
+        const REASONING_EFFORT_WIRE: Record<string, string> = { off: `none`, low: `low`, medium: `medium`, high: `high`, xhigh: `xhigh`, max: `max` };
+        const requestedReasoning = getStringOption( modelOptions, `reasoningEffort` ) ?? getStringOption( modelOptions, `thinking` );
+        const reasoningEffort = model.supportsReasoning && requestedReasoning
+            ? REASONING_EFFORT_WIRE[ requestedReasoning.toLowerCase() ] ?? requestedReasoning.toLowerCase()
+            : undefined;
         const request = {
             model: model.id,
             messages: mistralMessages,
             maxTokens: budget.effectiveTokens,
-            temperature: getNumberOption( modelOptions, `temperature` ) ?? model.temperature ?? 0.7,
+            reasoningEffort,
+            temperature: getNumberOption( modelOptions, `temperature` ) ?? model.temperature ?? workspace.getConfiguration( `mistral` ).get<number>( `temperature` ) ?? 0.2,
             topP: getNumberOption( modelOptions, `topP` ) ?? model.top_p,
             safePrompt: getBooleanOption( modelOptions, `safePrompt` ),
             promptCacheKey: computePromptCacheKey( model.id, mistralMessages ),
@@ -92,7 +102,7 @@ export class ChatResponseSession {
             toolChoice: shouldSendTools
                 ? options.toolMode === LanguageModelChatToolMode.Required ? `any` : `auto`
                 : undefined,
-            parallelToolCalls: shouldSendTools ? model.supportsParallelToolCalls ?? false : undefined,
+            parallelToolCalls: shouldSendTools ? true : undefined,
         };
         assertChatStreamRequest( request );
 
@@ -107,25 +117,30 @@ export class ChatResponseSession {
             if ( token.isCancellationRequested ) {
                 return context;
             }
-            const opened = await new CompletionStreamOpener().Open( client, request, budget, abortController.signal, log );
-            budget = opened.budget;
-            budgetDescription = this.__DescribeBudget( budget, model.outputLimitSource ) + contextDescription + reservationDescription;
-            log.debug( `[Mistral] Accepted completion budget: ${ budgetDescription }` );
-            const stream = opened.stream;
-            for await ( const event of stream ) {
-                if ( token.isCancellationRequested ) {
-                    break;
+            // One retry attempt covers opening the stream AND reading it to
+            // the end (ported from mistral-vibe's call_with_retries); the
+            // watchdog turns a silent stream into a retryable stall.
+            await callWithRetries( async () => {
+                const opened = await new CompletionStreamOpener().Open( client, request, budget, abortController.signal, log );
+                budget = opened.budget;
+                budgetDescription = this.__DescribeBudget( budget, model.outputLimitSource ) + contextDescription + reservationDescription;
+                log.debug( `[Mistral] Accepted completion budget: ${ budgetDescription }` );
+                const stream = guardStream( opened.stream, abortController.signal, log );
+                for await ( const event of stream ) {
+                    if ( token.isCancellationRequested ) {
+                        break;
+                    }
+                    processStreamEvent( event, context, progress, log );
                 }
-                processStreamEvent( event, context, progress, log );
-            }
-            if ( !token.isCancellationRequested ) {
-                if ( context.failureReason ) {
-                    throw new Error( `Mistral generation failed (finish reason: ${ context.failureReason }).` );
+                if ( !token.isCancellationRequested ) {
+                    if ( context.failureReason ) {
+                        throw new Error( `Mistral generation failed (finish reason: ${ context.failureReason }).` );
+                    }
+                    if ( !context.finishReason ) {
+                        throw new Error( `Mistral stream ended without a terminal finish reason; the response may be incomplete.` );
+                    }
                 }
-                if ( !context.finishReason ) {
-                    throw new Error( `Mistral stream ended without a terminal finish reason; the response may be incomplete.` );
-                }
-            }
+            }, { signal: abortController.signal, log, ...input.retryOptions } );
             return context;
         } finally {
             try {
